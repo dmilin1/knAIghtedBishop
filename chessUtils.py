@@ -19,8 +19,9 @@ class ChessUtils:
             board.pieces(chess.KING, chess.BLACK).mask
         ], dtype=np.uint64).view(np.uint8)), (12,8,8)).astype(np.float32)
     
-    def get_value_arr(game):
-        return np.array(1.0 if game.headers['Result'] == '1-0' else -1.0, dtype=np.float32)
+    def get_value_arr(game, moves_left, total_move_count):
+        moves_left_penalty = 0.1*(moves_left/total_move_count)**0.25
+        return np.array(1.0 - moves_left_penalty if game.headers['Result'] == '1-0' else -1.0 + moves_left_penalty, dtype=np.float32)
 
     def get_policy_arr(move):
         arr = np.zeros(4096, dtype=np.float32)

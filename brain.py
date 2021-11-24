@@ -1,11 +1,16 @@
+import enum
 import chess
 import chess.pgn
 import numpy as np
+import tensorflow as tf
 from tensorflow import keras
 from keras import layers, regularizers
 from chessUtils import ChessUtils
 import random
 import sys
+
+# tf.config.experimental.enable_tensor_float_32_execution(True)
+# keras.mixed_precision.set_global_policy('mixed_float16')
 
 class Brain:
 
@@ -15,6 +20,7 @@ class Brain:
     def __init__(self, load_saved=True):
         if load_saved:
             self.load_model()
+            self.prev_batch_size = None
 
     def gen_game_data():
         pgn = open("D:/Chess Datasets/big.pgn")
@@ -22,6 +28,10 @@ class Brain:
         while True:
             pointer = pgn.tell()
             headers = chess.pgn.read_headers(pgn)
+            if headers == None:
+                pgn.seek(0)
+                print('\n\n Reached end of database. Restarting. \n\n')
+                continue
             if (
                 'Bullet' not in headers['Event']
                 and (headers['Result'] == "1-0" or headers['Result'] == "0-1")
@@ -50,10 +60,11 @@ class Brain:
             while len(samples) < Brain.SAMPLE_MEM_SIZE:
                 game = next(game_gen)
                 board = game.board()
-                for i, move in enumerate(game.mainline_moves()):
-                    if (rand_list[i] < 0.1 and i < 10) or rand_list[i] < 0.25:
+                moves = list(game.mainline_moves())
+                for i, move in enumerate(moves):
+                    if True: #(rand_list[i] < 0.1 and i < 10) or rand_list[i] < 0.25:
                         inputs = ChessUtils.board_to_arr(board if board.turn else board.mirror())
-                        value = ChessUtils.get_value_arr(game)
+                        value = ChessUtils.get_value_arr(game, len(moves) - i - 1, len(moves))
                         policy = ChessUtils.get_policy_arr(move if board.turn else ChessUtils.mirror_move(move))
                         samples.append([inputs, value if board.turn else -value, policy])
                     board.push(move)
@@ -130,11 +141,17 @@ class Brain:
             'policy': keras.metrics.categorical_accuracy,
         })
 
-    def load_model(self):
+    def load_model(self, low_precision=True):
         self.model = keras.models.load_model(f"{sys.path[0]}/models/model")
+        if low_precision:
+            converter = tf.lite.TFLiteConverter.from_keras_model(self.model)
+            self.interpreter = tf.lite.Interpreter(model_content=converter.convert())
 
-    def learn(self):
-        self.build_model()
+    def learn(self, resume=True):
+        if resume:
+            self.load_model(low_precision=False)
+        else:
+            self.build_model()
         self.model.fit(
             Brain.gen_training_data(),
             epochs=1000,
@@ -152,7 +169,22 @@ class Brain:
     def predict_raw(self, boards):
         if not self.model:
             self.load_model()
-        return self.model.predict(boards)
+        if self.interpreter:
+            input_index = self.interpreter.get_input_details()[0]['index']
+            target_shape = np.shape(boards)
+            if target_shape[0] != self.prev_batch_size:
+                print(target_shape[0])
+                self.interpreter.resize_tensor_input(input_index, target_shape)
+                self.interpreter.allocate_tensors()
+                self.prev_batch_size = target_shape[0]
+            value_index, policy_index = self.interpreter.get_output_details()[0]['index'], self.interpreter.get_output_details()[1]['index']
+            self.interpreter.set_tensor(input_index, boards)
+            self.interpreter.invoke()
+            value = self.interpreter.get_tensor(value_index)
+            policy = self.interpreter.get_tensor(policy_index)
+            return value, policy
+        else:
+            return self.model.predict(boards)
 
 class SaveModel(keras.callbacks.Callback):
     def on_epoch_end(self, epoch, logs=None):
